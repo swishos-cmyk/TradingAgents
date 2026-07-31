@@ -201,6 +201,23 @@ print(decision)
 
 See `tradingagents/default_config.py` for all configuration options.
 
+## Daily Trading Desk (Claude + Robinhood)
+
+The repo also ships an autonomous **daily trading graph** aimed at small
+accounts: a Claude-powered scan → analyze → challenge → plan → risk →
+execute → journal pipeline with a paper broker (default), an optional
+Robinhood connector, a deterministic risk guard, and a nightly
+self-improving playbook.
+
+```bash
+python run_daily.py                  # paper-trading session for today
+python run_daily.py --reflect        # evening playbook update
+```
+
+See [docs/DAILY_TRADING.md](docs/DAILY_TRADING.md) for the architecture,
+risk model, live-trading gates, and an honest discussion of return
+expectations.
+
 ## Contributing
 
 We welcome contributions from the community! Whether it's fixing a bug, improving documentation, or suggesting a new feature, your input helps make this project better. If you are interested in this line of research, please consider joining our open-source financial AI research community [Tauric Research](https://tauric.ai/).
