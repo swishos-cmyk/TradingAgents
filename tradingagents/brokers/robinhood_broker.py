@@ -181,6 +181,36 @@ class RobinhoodBroker(BaseBroker):
             meta={"raw": {k: result.get(k) for k in ("id", "state", "reject_reason")}},
         )
 
+    def get_order(self, order_id: str) -> Optional[Order]:
+        info = self.rh.orders.get_stock_order_info(order_id)
+        if not info:
+            return None
+        state = info.get("state", "unknown")
+        try:
+            filled_qty = float(info.get("cumulative_quantity") or 0)
+        except (TypeError, ValueError):
+            filled_qty = 0.0
+        try:
+            avg_price = float(info.get("average_price") or 0) or None
+        except (TypeError, ValueError):
+            avg_price = None
+        symbol = ""
+        instrument = info.get("instrument")
+        if instrument:
+            try:
+                symbol = self.rh.stocks.get_symbol_by_url(instrument) or ""
+            except Exception:
+                symbol = ""
+        return Order(
+            order_id=order_id,
+            symbol=symbol,
+            side=info.get("side", ""),
+            quantity=filled_qty,
+            order_type=info.get("type", "market"),
+            status=state,
+            filled_price=avg_price,
+        )
+
     def cancel_open_orders(self, symbol: Optional[str] = None) -> int:
         open_orders = self.rh.orders.get_all_open_stock_orders() or []
         cancelled = 0

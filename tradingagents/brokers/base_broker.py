@@ -103,3 +103,8 @@ class BaseBroker(ABC):
     @abstractmethod
     def cancel_open_orders(self, symbol: Optional[str] = None) -> int:
         """Cancel open orders (optionally for one symbol). Returns count."""
+
+    def get_order(self, order_id: str) -> Optional[Order]:
+        """Look up an order by id to confirm its fill status. Brokers that
+        cannot look orders up return None."""
+        return None

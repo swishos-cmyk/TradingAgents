@@ -23,7 +23,8 @@ execute -> journal, wired for Claude and a Robinhood (or paper) broker.
 
 import json
 import os
-from typing import Any, Dict, Optional
+from datetime import date
+from typing import Any, Dict, List, Optional
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -42,11 +43,12 @@ from tradingagents.agents.daily import (
     create_trade_planner,
     load_playbook,
 )
+from tradingagents.agents.daily.strategy_lab import load_memory_from_disk
 from tradingagents.agents.daily.catalyst_analyst import CATALYST_TOOLS
 from tradingagents.agents.daily.opportunity_scanner import SCANNER_TOOLS
 from tradingagents.agents.daily.setup_analyst import SETUP_TOOLS
 from tradingagents.agents.utils.memory import FinancialSituationMemory
-from tradingagents.brokers import RiskGuard, create_broker
+from tradingagents.brokers import RiskGuard, create_broker, trade_ledger
 from tradingagents.daily_config import DAILY_TRADING_CONFIG
 from tradingagents.dataflows.config import set_config
 from tradingagents.llm_clients import create_llm_client
@@ -89,6 +91,8 @@ class DailyTradingGraph:
         os.makedirs(state_dir, exist_ok=True)
         self.playbook_path = os.path.join(state_dir, "playbook.json")
         self.journal_path = os.path.join(state_dir, "journal.jsonl")
+        self.ledger_path = os.path.join(state_dir, "open_trades.json")
+        self.memory_path = os.path.join(state_dir, "memory.json")
 
         # broker + deterministic risk engine
         self.broker = create_broker(self.config)
@@ -117,8 +121,13 @@ class DailyTradingGraph:
         self.quick_llm = quick.get_llm()
 
         self.trader_memory = FinancialSituationMemory("daily_trader_memory", self.config)
+        load_memory_from_disk(self.trader_memory, self.memory_path)
         self.strategy_lab = create_strategy_lab(
-            self.deep_llm, self.playbook_path, self.journal_path, self.trader_memory
+            self.deep_llm,
+            self.playbook_path,
+            self.journal_path,
+            self.trader_memory,
+            memory_path=self.memory_path,
         )
 
         self.graph = self._build_graph()
@@ -133,7 +142,7 @@ class DailyTradingGraph:
         advocate = create_devils_advocate(self.deep_llm)
         planner = create_trade_planner(self.deep_llm, self.trader_memory)
         risk_officer = create_risk_officer(self.deep_llm, self.risk_guard)
-        executor = create_execution_agent(self.broker)
+        executor = create_execution_agent(self.broker, self.ledger_path)
         journal = create_journal_node(self.journal_path)
 
         workflow = StateGraph(DailyTradingState)
@@ -197,21 +206,97 @@ class DailyTradingGraph:
             {"account": account.to_dict(), "positions": positions}, indent=2
         )
 
+    def _record_exit(self, trade: Optional[Dict], trade_date: str) -> None:
+        """A same-session open-and-close is a day trade for PDT purposes."""
+        if trade and trade.get("entry_date") == trade_date:
+            self.risk_guard.record_day_trade(trade["symbol"], on_date=trade_date)
+
+    def manage_open_positions(self, trade_date: str) -> List[str]:
+        """Enforce the accepted plans on existing positions before any new
+        decision: sweep breached stops, take profits at target, and close
+        anything past its max holding period. Returns report lines."""
+        lines = []
+
+        # 1. paper broker: fill any protective stops breached since last run
+        if hasattr(self.broker, "process_stops"):
+            for order in self.broker.process_stops():
+                trade = trade_ledger.close_trade(
+                    self.ledger_path, order.symbol, trade_date,
+                    order.filled_price, reason="stop_loss",
+                )
+                self._record_exit(trade, trade_date)
+                lines.append(
+                    f"Stop filled: SELL {order.quantity} {order.symbol} "
+                    f"@ ${order.filled_price:.4f}"
+                )
+
+        held = {p.symbol: p for p in self.broker.get_positions()}
+
+        for trade in trade_ledger.open_trades(self.ledger_path):
+            symbol = trade["symbol"]
+
+            # position gone (e.g. live stop filled at the broker): reconcile
+            if symbol not in held:
+                closed = trade_ledger.close_trade(
+                    self.ledger_path, symbol, trade_date, None,
+                    reason="closed_at_broker",
+                )
+                self._record_exit(closed, trade_date)
+                lines.append(f"Reconciled: {symbol} no longer held; ledger closed.")
+                continue
+
+            try:
+                quote = self.broker.get_quote(symbol)
+            except Exception as exc:
+                lines.append(f"Could not quote {symbol} ({exc}); position left as-is.")
+                continue
+
+            days_held = (
+                date.fromisoformat(trade_date)
+                - date.fromisoformat(trade["entry_date"])
+            ).days  # calendar days — conservative vs. trading days
+            hit_target = trade.get("take_profit") and quote >= trade["take_profit"]
+            time_out = days_held >= int(trade.get("max_holding_days") or 2)
+            if not (hit_target or time_out):
+                continue
+
+            reason = "take_profit" if hit_target else "max_holding_days"
+            qty = min(trade["quantity"], held[symbol].quantity)
+            try:
+                self.broker.cancel_open_orders(symbol)
+                order = self.broker.place_order(symbol, "sell", qty, order_type="market")
+                closed = trade_ledger.close_trade(
+                    self.ledger_path, symbol, trade_date,
+                    order.filled_price, reason=reason,
+                )
+                self._record_exit(closed, trade_date)
+                lines.append(
+                    f"Exit ({reason}): SELL {qty} {symbol}"
+                    + (f" @ ${order.filled_price:.4f}" if order.filled_price else "")
+                )
+            except Exception as exc:
+                lines.append(f"EXIT FAILED for {symbol} ({reason}): {exc}")
+
+        return lines
+
     def run_session(self, trade_date: str) -> Dict[str, Any]:
         """Run one full trading session for the given date."""
-        # paper broker: sweep any protective stops breached since last run
-        if hasattr(self.broker, "process_stops"):
-            triggered = self.broker.process_stops()
-            for order in triggered:
-                self.risk_guard.record_day_trade(order.symbol, on_date=trade_date)
+        management_report = self.manage_open_positions(trade_date)
 
         playbook = load_playbook(self.playbook_path)
+        management_note = (
+            "Position management already ran this morning:\n"
+            + "\n".join(management_report)
+            if management_report
+            else "No open positions required management this morning."
+        )
         init_state = {
             "messages": [
                 (
                     "human",
-                    f"Run the daily trading session for {trade_date}. Begin by "
-                    "scanning the playbook watchlist.",
+                    f"Run the daily trading session for {trade_date}. "
+                    f"{management_note}\n"
+                    "Begin by scanning the playbook watchlist.",
                 )
             ],
             "trade_date": trade_date,
@@ -240,6 +325,13 @@ class DailyTradingGraph:
         else:
             final_state = self.graph.invoke(init_state, **args)
 
+        if management_report:
+            final_state["execution_report"] = (
+                "PRE-SESSION POSITION MANAGEMENT:\n"
+                + "\n".join(management_report)
+                + "\n\n"
+                + final_state.get("execution_report", "")
+            )
         self._save_session_log(trade_date, final_state)
         return final_state
 

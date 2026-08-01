@@ -67,6 +67,29 @@ def append_journal(journal_path: str, entry: dict) -> None:
         f.write(json.dumps(entry) + "\n")
 
 
+def load_memory_from_disk(memory, memory_path: str) -> int:
+    """Hydrate a FinancialSituationMemory from its JSON snapshot so
+    lessons survive across daily processes. Returns pairs loaded."""
+    if not os.path.exists(memory_path):
+        return 0
+    with open(memory_path, "r", encoding="utf-8") as f:
+        pairs = json.load(f)
+    if pairs:
+        memory.add_situations([(p[0], p[1]) for p in pairs])
+    return len(pairs)
+
+
+def append_memory_to_disk(memory_path: str, situation: str, lesson: str) -> None:
+    pairs = []
+    if os.path.exists(memory_path):
+        with open(memory_path, "r", encoding="utf-8") as f:
+            pairs = json.load(f)
+    pairs.append([situation, lesson])
+    os.makedirs(os.path.dirname(memory_path) or ".", exist_ok=True)
+    with open(memory_path, "w", encoding="utf-8") as f:
+        json.dump(pairs, f, indent=2)
+
+
 def create_journal_node(journal_path: str):
     """Terminal node of every session run: one structured journal line."""
 
@@ -99,10 +122,13 @@ def _last_line(text: str, prefix: str) -> str:
     return ""
 
 
-def create_strategy_lab(llm, playbook_path: str, journal_path: str, trader_memory):
+def create_strategy_lab(
+    llm, playbook_path: str, journal_path: str, trader_memory, memory_path: str = None
+):
     """Reflection runner (invoked after the close, outside the intraday
     graph): reads recent journal entries + realized P&L and rewrites the
-    playbook within bounds. Also feeds the trader memory."""
+    playbook within bounds. Also feeds the trader memory (persisted to
+    memory_path so lessons survive across daily processes)."""
 
     def reflect(trade_date: str, realized_pnl_note: str = "") -> str:
         playbook = load_playbook(playbook_path)
@@ -155,9 +181,10 @@ LESSON_FOR_MEMORY: <one sentence capturing today's most important lesson>"""
         lesson = _last_line(content, "LESSON_FOR_MEMORY:")
         if lesson and recent:
             situation = json.dumps(recent[-1])[:2000]
-            trader_memory.add_situations(
-                [(situation, lesson.split(":", 1)[1].strip())]
-            )
+            advice = lesson.split(":", 1)[1].strip()
+            trader_memory.add_situations([(situation, advice)])
+            if memory_path:
+                append_memory_to_disk(memory_path, situation, advice)
 
         return json.dumps(new_playbook, indent=2)
 

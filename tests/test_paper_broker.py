@@ -128,3 +128,40 @@ def test_slippage_applied(tmp_path, clock):
     assert buy.filled_price == pytest.approx(100.10)
     sell = b.place_order("TEST", "sell", 1)
     assert sell.filled_price == pytest.approx(99.90)
+
+
+def test_unmarketable_buy_limit_does_not_fill(broker):
+    # quote is $10; a buy limit at $9 must NOT fill, and cash must not move
+    order = broker.place_order("TEST", "buy", 10, order_type="limit", limit_price=9.0)
+    assert order.status == "unfilled"
+    assert broker.get_account().settled_cash == 1000.0
+    assert broker.get_positions() == []
+
+
+def test_marketable_buy_limit_fills_no_worse_than_limit(tmp_path, clock):
+    quotes = {"TEST": 10.0}
+    b = PaperBroker(
+        state_path=str(tmp_path / "p.json"),
+        starting_cash=1000.0,
+        slippage_bps=100.0,  # 1% slip would push past a tight limit
+        quote_fn=lambda s: quotes[s],
+        now_fn=clock,
+    )
+    order = b.place_order("TEST", "buy", 10, order_type="limit", limit_price=10.05)
+    assert order.status == "filled"
+    assert order.filled_price == 10.05  # capped at the limit, not 10.10
+
+
+def test_unmarketable_sell_limit_does_not_fill(broker):
+    broker.place_order("TEST", "buy", 10)
+    order = broker.place_order("TEST", "sell", 10, order_type="limit", limit_price=11.0)
+    assert order.status == "unfilled"
+    assert broker.get_positions()[0].quantity == 10
+
+
+def test_get_order_lookup(broker):
+    placed = broker.place_order("TEST", "buy", 5)
+    found = broker.get_order(placed.order_id)
+    assert found is not None
+    assert found.status == "filled"
+    assert found.quantity == 5

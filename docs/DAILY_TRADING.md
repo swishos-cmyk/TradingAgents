@@ -68,7 +68,7 @@ flowchart TD
 | Devil's Advocate | deep (Opus) | none | Attack the trade: base rates, crowding, thesis fragility, level quality. Ends `VERDICT: KILL / PROCEED` |
 | Trade Planner | deep (Opus) | trader memory | Synthesize everything into one strict-JSON plan; must rebut a KILL explicitly or fold |
 | Risk Officer | deep (Opus) + code | RiskGuard | LLM judgment veto (coherence, correlation, event exposure) **plus** deterministic circuit breakers and sizing |
-| Executor | none (pure code) | broker | Place entry, attach protective stop, report faithfully |
+| Executor | none (pure code) | broker | Place entry, **confirm the fill** (polling live brokers, cancelling on timeout), attach the protective stop for the filled quantity only, record the trade in the open-trades ledger |
 | Journal | none (pure code) | jsonl | One structured record per session |
 | Strategy Lab | deep (Opus) | playbook + journal | Nightly: update watchlist, setup win/loss stats, distilled lessons; tune scan thresholds within hard bounds |
 
@@ -85,6 +85,15 @@ The final sizing and every hard limit live in
 - kill switch at −20% from the high-water mark: strategy stops until a
   human calls `RiskGuard.reset_kill_switch()`
 - cash-account settled-funds check (T+1), PDT tracking for margin
+  (every new margin-account entry is treated as a *potential* day trade,
+  since its stop can fire the same session)
+
+Before each session's new decisions, a deterministic position-management
+sweep enforces the accepted plans on existing holdings: breached stops
+are filled (paper), positions at their profit target are sold, and
+anything past its `max_holding_days` is closed. Every entry and exit is
+tracked in `open_trades.json`, which is also how same-day round trips
+are recognized as day trades.
 
 ### Self-improvement loop ("develops its own tools")
 
@@ -169,6 +178,7 @@ tradingagents/
     paper_broker.py       # file-backed simulator (T+1, slippage, stops)
     robinhood_broker.py   # robin_stocks connector, double-gated
     risk_guard.py         # deterministic circuit breakers + sizing
+    trade_ledger.py       # open-trade ledger: targets, holding periods, day-trade detection
   agents/daily/
     mission.py            # shared mission preamble (the honest mandate)
     opportunity_scanner.py, setup_analyst.py, catalyst_analyst.py,

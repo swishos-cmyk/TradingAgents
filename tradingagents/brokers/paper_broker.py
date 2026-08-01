@@ -144,9 +144,34 @@ class PaperBroker(BaseBroker):
         extended_hours: bool = False,
     ) -> Order:
         self._apply_settlements()
-        reference = limit_price if (order_type == "limit" and limit_price) else self.get_quote(symbol)
+        reference = self.get_quote(symbol)
         slip = reference * (self.slippage_bps / 10_000.0)
-        fill_price = round(reference + slip, 4) if side == "buy" else round(reference - slip, 4)
+
+        # Honor limit semantics: a limit order only fills when the market
+        # is at or through the limit, and never at a worse price than it.
+        if order_type == "limit" and limit_price is not None:
+            marketable = reference <= limit_price if side == "buy" else reference >= limit_price
+            if not marketable:
+                order = Order(
+                    order_id=str(uuid.uuid4())[:8],
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    order_type=order_type,
+                    limit_price=limit_price,
+                    stop_price=stop_price,
+                    time_in_force=time_in_force,
+                    status="unfilled",
+                )
+                self._state["orders"].append(order.to_dict())
+                self._save_state()
+                return order
+            if side == "buy":
+                fill_price = round(min(reference + slip, limit_price), 4)
+            else:
+                fill_price = round(max(reference - slip, limit_price), 4)
+        else:
+            fill_price = round(reference + slip, 4) if side == "buy" else round(reference - slip, 4)
 
         cost = fill_price * quantity
         if side == "buy":
@@ -206,6 +231,12 @@ class PaperBroker(BaseBroker):
         self._state["stop_orders"].append(order.to_dict())
         self._save_state()
         return order
+
+    def get_order(self, order_id: str) -> Optional[Order]:
+        for record in self._state["orders"]:
+            if record.get("order_id") == order_id:
+                return Order(**record)
+        return None
 
     def cancel_open_orders(self, symbol: Optional[str] = None) -> int:
         before = len(self._state["stop_orders"])

@@ -18,4 +18,4 @@ jobs:
       - name: Install test dependencies
         run: pip install pytest
       - name: Run broker and risk-guard tests
-        run: python -m pytest tests/test_risk_guard.py tests/test_paper_broker.py -q
+        run: python -m pytest tests/test_risk_guard.py tests/test_paper_broker.py tests/test_trade_ledger.py -q

@@ -80,11 +80,18 @@ CATALYST REPORT (for the event calendar):
             for p in account.get("positions", [])
         )
 
+        # PDT gate: on a sub-$25k margin account, every new entry is a
+        # POTENTIAL day trade — the protective stop can fire the same
+        # session and close it. Treat it as one up front rather than
+        # discovering the violation after the exit.
+        acct = account.get("account", account)
+        is_potential_day_trade = acct.get("account_type") == "margin"
+
         guard_verdict = risk_guard.evaluate(
             plan=plan,
-            account=account.get("account", account),
+            account=acct,
             open_positions=open_positions,
-            is_day_trade=plan.get("max_holding_days", 2) == 0,
+            is_day_trade=is_potential_day_trade,
             on_date=state["trade_date"],
         )
 
