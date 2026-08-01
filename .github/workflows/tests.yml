@@ -1,0 +1,21 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  daily-desk-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The broker/risk-guard tests are dependency-light by design:
+      # quotes are injected, so no network or LLM keys are needed.
+      - name: Install test dependencies
+        run: pip install pytest
+      - name: Run broker and risk-guard tests
+        run: python -m pytest tests/test_risk_guard.py tests/test_paper_broker.py tests/test_trade_ledger.py -q

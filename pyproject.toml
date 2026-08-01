@@ -32,6 +32,12 @@ dependencies = [
     "yfinance>=0.2.63",
 ]
 
+[project.optional-dependencies]
+live = [
+    "robin-stocks>=3.0.0",
+    "pyotp>=2.9.0",
+]
+
 [project.scripts]
 tradingagents = "cli.main:app"
 
